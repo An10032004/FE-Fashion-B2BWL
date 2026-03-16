@@ -199,24 +199,6 @@ export interface PaymentTransaction {
   payDate: string;
 }
 
-export interface SubscriptionPlan {
-  id: number;
-  name: string;
-  monthlyPrice: number;
-  yearlyPrice: number;
-  features: string; // JSON
-  status: string;
-}
-
-export interface Shop {
-  id: number;
-  domain: string;
-  plan?: SubscriptionPlan;
-  ownerEmail: string;
-  shopName: string;
-  status: string;
-}
-
 export interface AIProductSync {
   id: number;
   product: Product;
@@ -224,6 +206,28 @@ export interface AIProductSync {
   vectorId: string;
   lastSyncedAt: string;
   shopId: number;
+}
+
+export interface SalesReport {
+  totalRevenue: number;
+  totalOrders: number;
+  bestSellers: { name: string; quantity: number; revenue: number }[];
+  revenueByDate: { date: string; amount: number }[];
+}
+
+export interface Expense {
+  id: number;
+  category: 'INVENTORY' | 'SHIPPING' | 'MARKETING' | 'SALARY' | 'OPERATIONS' | 'OTHER';
+  amount: number;
+  date: string;
+  description?: string;
+  shopId: number;
+}
+
+export interface VatReport {
+  collectedVat: number;
+  payableVat: number;
+  netVat: number;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -400,6 +404,9 @@ export class ApiService {
   getUsers(): Observable<User[]> {
     return this.http.get<ApiResponse<User[]>>(`${this.base}/users`).pipe(map(r => r.data));
   }
+  getUsersByRoles(roles: string[]): Observable<User[]> {
+    return this.http.get<ApiResponse<User[]>>(`${this.base}/users/roles`, { params: { roles: roles.join(',') } }).pipe(map(r => r.data));
+  }
   createUser(body: any): Observable<User> {
     return this.http.post<ApiResponse<User>>(`${this.base}/users`, body).pipe(map(r => r.data));
   }
@@ -437,39 +444,28 @@ export class ApiService {
     return this.http.get<ApiResponse<PaymentTransaction[]>>(`${this.base}/payments/order/${orderId}/transactions`).pipe(map(r => r.data));
   }
 
-  // ─── Subscription Plans (Module 0) ──────────────────────
-  getPlans(): Observable<SubscriptionPlan[]> {
-    return this.http.get<ApiResponse<SubscriptionPlan[]>>(`${this.base}/plans`).pipe(map(r => r.data));
-  }
-  createPlan(body: Partial<SubscriptionPlan>): Observable<SubscriptionPlan> {
-    return this.http.post<ApiResponse<SubscriptionPlan>>(`${this.base}/plans`, body).pipe(map(r => r.data));
-  }
-  updatePlan(id: number, body: Partial<SubscriptionPlan>): Observable<SubscriptionPlan> {
-    return this.http.put<ApiResponse<SubscriptionPlan>>(`${this.base}/plans/${id}`, body).pipe(map(r => r.data));
-  }
-
-  // ─── Shops (Module 0) ──────────────────────────────────
-  getShops(): Observable<Shop[]> {
-    return this.http.get<ApiResponse<Shop[]>>(`${this.base}/shops`).pipe(map(r => r.data));
-  }
-  createShop(body: Partial<Shop>): Observable<Shop> {
-    return this.http.post<ApiResponse<Shop>>(`${this.base}/shops`, body).pipe(map(r => r.data));
-  }
-  getShopByDomain(domain: string): Observable<Shop> {
-    return this.http.get<ApiResponse<Shop>>(`${this.base}/shops/domain?domain=${domain}`).pipe(map(r => r.data));
-  }
-  updateShop(id: number, body: Partial<Shop>): Observable<Shop> {
-    return this.http.put<ApiResponse<Shop>>(`${this.base}/shops/${id}`, body).pipe(map(r => r.data));
-  }
-  updateShopStatus(id: number, status: string): Observable<Shop> {
-    return this.http.patch<ApiResponse<Shop>>(`${this.base}/shops/${id}/status?status=${status}`, {}).pipe(map(r => r.data));
-  }
-
   // ─── AI Sync (Module 5) ──────────────────────────────
   getAiSyncStatus(): Observable<AIProductSync[]> {
     return this.http.get<ApiResponse<AIProductSync[]>>(`${this.base}/ai-sync/status`).pipe(map(r => r.data));
   }
   syncProductAi(productId: number): Observable<AIProductSync> {
     return this.http.post<ApiResponse<AIProductSync>>(`${this.base}/ai-sync/sync/${productId}`, {}).pipe(map(r => r.data));
+  }
+
+  // ─── Reports & Analytics ──────────────────────────────
+  getSalesReport(startDate?: string, endDate?: string): Observable<SalesReport> {
+    return this.http.get<ApiResponse<SalesReport>>(`${this.base}/reports/sales`, { params: { startDate: startDate || '', endDate: endDate || '' } }).pipe(map(r => r.data));
+  }
+
+  getExpenses(): Observable<Expense[]> {
+    return this.http.get<ApiResponse<Expense[]>>(`${this.base}/reports/expenses`).pipe(map(r => r.data));
+  }
+
+  createExpense(body: Partial<Expense>): Observable<Expense> {
+    return this.http.post<ApiResponse<Expense>>(`${this.base}/reports/expenses`, body).pipe(map(r => r.data));
+  }
+
+  getVatReport(): Observable<VatReport> {
+    return this.http.get<ApiResponse<VatReport>>(`${this.base}/reports/vat`).pipe(map(r => r.data));
   }
 }

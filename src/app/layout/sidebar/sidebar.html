@@ -10,6 +10,16 @@
 
   <a
     tuiAsideItem
+    routerLink="/dashboard"
+    routerLinkActive="active"
+    [routerLinkActiveOptions]="{ exact: false }"
+  >
+    <tui-icon icon="@tui.layout-grid" />
+    {{ 'SIDEBAR.DASHBOARD' | transloco }}
+  </a>
+
+  <a
+    tuiAsideItem
     routerLink="/categories"
     [routerLinkActiveOptions]="{ exact: false }"
   >
@@ -69,6 +79,15 @@
   >
     <tui-icon icon="@tui.shopping-cart" />
     {{ 'SIDEBAR.ORDERS' | transloco }}
+  </a>
+
+  <a
+    tuiAsideItem
+    routerLink="/staff"
+    [routerLinkActiveOptions]="{ exact: false }"
+  >
+    <tui-icon icon="@tui.shield-check" />
+    {{ 'SIDEBAR.STAFF' | transloco }}
   </a>
 
   <a

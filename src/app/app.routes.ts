@@ -1,7 +1,12 @@
 import { Routes } from '@angular/router';
 
 export const routes: Routes = [
-  { path: '', redirectTo: 'categories', pathMatch: 'full' },
+  { path: '', redirectTo: 'dashboard', pathMatch: 'full' },
+  {
+    path: 'dashboard',
+    loadComponent: () =>
+      import('./pages/dashboard/dashboard').then(m => m.DashboardComponent),
+  },
   {
     path: 'categories',
     loadComponent: () =>
@@ -42,16 +47,12 @@ export const routes: Routes = [
     loadComponent: () => import('./pages/orders/orders').then(m => m.OrdersComponent)
   },
   {
-    path: 'plans',
-    loadComponent: () => import('./pages/plans/plans').then(m => m.PlansComponent)
-  },
-  {
-    path: 'shops',
-    loadComponent: () => import('./pages/shops/shops').then(m => m.ShopsComponent)
-  },
-  {
     path: 'ai-sync',
     loadComponent: () => import('./pages/ai-sync/ai-sync').then(m => m.AiSyncComponent)
+  },
+  {
+    path: 'staff',
+    loadComponent: () => import('./pages/staff/staff').then(m => m.StaffComponent)
   },
   { path: '**', redirectTo: 'categories' }
 ];
