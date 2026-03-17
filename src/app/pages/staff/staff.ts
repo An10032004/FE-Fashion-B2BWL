@@ -20,54 +20,55 @@ import {
 } from '@taiga-ui/core';
 import { 
   TuiDataListWrapper, 
+  TuiBadge,
   TuiInputNumber
 } from '@taiga-ui/kit';
 import { TuiSelectModule, TuiTextfieldControllerModule } from '@taiga-ui/legacy';
 import { TranslocoModule, TranslocoService } from '@jsverse/transloco';
-import { ApiService, OrderLimit } from '../../services/api.service';
+import { ApiService, User } from '../../services/api.service';
 import { LanguageService } from '../../services/language.service';
 import { Subscription } from 'rxjs';
 import { ActionRendererComponent } from '../../shared/components/action-renderer/action-renderer.component';
 import { AG_GRID_LOCALE_VI } from '../../shared/utils/ag-grid-locale-vi';
-import { OrderLimitEditorComponent } from './order-limit-editor';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
 @Component({
-  selector: 'app-order-limits',
+  selector: 'app-staff',
   standalone: true,
   imports: [
     CommonModule, FormsModule, AgGridAngular, TuiButton, TuiInputNumber, 
-    TuiSelectModule, TuiDataList, TuiDataListWrapper,
-    TuiTextfieldControllerModule, TuiLabel, TuiIcon, TranslocoModule, ActionRendererComponent, TuiTextfield,
-    OrderLimitEditorComponent
+    TuiSelectModule, TuiDataList, TuiDataListWrapper, TuiBadge,
+    TuiTextfieldControllerModule, TuiLabel, TuiIcon, TranslocoModule, ActionRendererComponent, TuiTextfield
   ],
-  templateUrl: './order-limits.html',
-  styleUrls: ['../pricing-rules/pricing-rules.scss'],
+  templateUrl: './staff.html',
+  styleUrls: ['./staff.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class OrderLimitsComponent implements OnInit, OnDestroy {
+export class StaffComponent implements OnInit, OnDestroy {
   @ViewChild('deleteDialog') deleteDialogTemplate!: TemplateRef<any>;
+  @ViewChild('viewDialog') viewDialogTemplate!: TemplateRef<any>;
   deleteTargetName: string = '';
+  selectedUser: User | null = null;
 
-  rowData: OrderLimit[] = [];
+  rowData: User[] = [];
   gridApi!: GridApi;
   columnDefs: ColDef[] = [];
   localeText: any = {};
-
+  
   showForm = false;
-  showDetails = false;
   editingId: number | null = null;
-  selectedRule: OrderLimit | null = null;
-
-  formData: Partial<OrderLimit> = {
-    name: '', priority: 0, status: 'ACTIVE', limitLevel: 'PER_ORDER', limitType: 'MIN_ORDER_QUANTITY', limitValue: 0,
-    applyCustomerType: 'ALL', applyCustomerValue: '{}', applyProductType: 'ALL', applyProductValue: '{}'
+  
+  formData: any = {
+    email: '',
+    password: '',
+    fullName: '',
+    phone: '',
+    role: 'STAFF',
+    registrationStatus: 'APPROVED'
   };
 
-  statusOptions = ['ACTIVE', 'INACTIVE'];
-  levelOptions = ['PER_VARIANT', 'PER_PRODUCT', 'PER_ORDER'];
-  typeOptions = ['MIN_ORDER_QUANTITY', 'MAX_ORDER_AMOUNT'];
+  roleOptions = ['ADMIN', 'STAFF'];
 
   private langSub?: Subscription;
 
@@ -83,6 +84,7 @@ export class OrderLimitsComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.updateColumnDefs();
     this.loadData();
+
     this.langSub = this.transloco.selectTranslation().subscribe(() => {
       this.localeText = this.languageService.currentLanguage === 'vi' ? AG_GRID_LOCALE_VI : {};
       if (this.gridApi) {
@@ -96,7 +98,7 @@ export class OrderLimitsComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void { this.langSub?.unsubscribe(); }
 
   loadData(): void {
-    this.api.getOrderLimits().subscribe(data => {
+    this.api.getUsersByRoles(['ADMIN', 'STAFF']).subscribe(data => {
       this.rowData = data;
       this.cdr.detectChanges();
     });
@@ -105,21 +107,36 @@ export class OrderLimitsComponent implements OnInit, OnDestroy {
   updateColumnDefs(): void {
     this.columnDefs = [
       { field: 'id', headerName: 'ID', width: 70 },
-      { field: 'name', headerValueGetter: () => this.transloco.translate('RULE.NAME'), flex: 1 },
-      { field: 'limitLevel', headerValueGetter: () => this.transloco.translate('RULE.LEVEL'), width: 130, valueFormatter: (params: any) => this.transloco.translate('ENUMS.' + params.value) },
-      { field: 'limitType', headerValueGetter: () => this.transloco.translate('RULE.TYPE'), width: 150, valueFormatter: (params: any) => this.transloco.translate('ENUMS.' + params.value) },
-      { field: 'limitValue', headerValueGetter: () => this.transloco.translate('RULE.VALUE'), width: 100 },
+      { field: 'email', headerValueGetter: () => this.transloco.translate('MEMBER.EMAIL'), flex: 1 },
+      { field: 'fullName', headerValueGetter: () => this.transloco.translate('MEMBER.NAME'), flex: 1 },
+      { 
+        field: 'role', 
+        headerValueGetter: () => this.transloco.translate('MEMBER.ROLE'), 
+        width: 150,
+        cellRenderer: (params: any) => {
+          const role = params.value;
+          const color = role === 'ADMIN' ? 'primary' : 'neutral';
+          return `<span class="tui-badge tui-badge_${color}">${this.transloco.translate('ENUMS.' + role)}</span>`;
+        }
+      },
+      { field: 'phone', headerValueGetter: () => this.transloco.translate('MEMBER.PHONE'), width: 130 },
       { 
         headerValueGetter: () => this.transloco.translate('COMMON.ACTIONS'),
-        width: 260,
+        width: 200,
         cellRenderer: ActionRendererComponent,
         cellRendererParams: {
-          onView: (data: OrderLimit) => this.onView(data),
-          onEdit: (data: OrderLimit) => this.onEdit(data),
-          onDelete: (data: OrderLimit) => this.onDelete(data)
+          onView: (data: User) => this.onView(data),
+          onEdit: (data: User) => this.onEdit(data),
+          onDelete: (data: User) => this.onDelete(data)
         }
       }
     ];
+  }
+
+  onView(user: User): void {
+    this.selectedUser = user;
+    this.dialogs.open(this.viewDialogTemplate, { size: 'm', label: this.transloco.translate('MEMBER.USER_DETAIL') })
+      .subscribe();
   }
 
   onGridReady(params: GridReadyEvent): void {
@@ -127,42 +144,32 @@ export class OrderLimitsComponent implements OnInit, OnDestroy {
     this.gridApi.sizeColumnsToFit();
   }
 
-  onView(rule: OrderLimit): void {
-    this.selectedRule = rule;
-    this.showDetails = true;
-    this.showForm = false;
-    this.cdr.detectChanges();
-  }
-
-  onCloseDetails(): void {
-    this.showDetails = false;
-    this.selectedRule = null;
-  }
-
   onAdd(): void {
     this.editingId = null;
-    this.formData = { name: '', priority: 0, status: 'ACTIVE', limitLevel: 'PER_ORDER', limitType: 'MIN_ORDER_QUANTITY', limitValue: 0 };
+    this.formData = {
+      email: '', password: '', fullName: '', phone: '', role: 'STAFF',
+      registrationStatus: 'APPROVED'
+    };
     this.showForm = true;
-    this.showDetails = false;
     this.cdr.detectChanges();
   }
 
-  onEdit(data: OrderLimit): void {
-    console.log('--- OrderLimit onEdit Data Received ---', data);
-    this.editingId = data.id;
-    this.formData = { ...data };
-    console.log('--- FormData After Spread ---', this.formData);
+  onEdit(user: User): void {
+    this.editingId = user.id;
+    this.formData = { 
+      ...user, 
+      password: '' // Don't show password hash
+    };
     this.showForm = true;
-    this.showDetails = false;
     this.cdr.detectChanges();
   }
 
-  onDelete(rule: OrderLimit): void {
-    this.deleteTargetName = rule.name;
+  onDelete(user: User): void {
+    this.deleteTargetName = user.fullName || user.email;
     this.dialogs.open<boolean>(this.deleteDialogTemplate, { size: 'm' })
       .subscribe(response => {
         if (response) {
-          this.api.deleteOrderLimit(rule.id).subscribe(() => {
+          this.api.deleteUser(user.id).subscribe(() => {
             this.alerts.open(this.transloco.translate('GLOBAL.RECORD_DELETED'), { appearance: 'success' }).subscribe();
             this.loadData();
           });
@@ -171,14 +178,15 @@ export class OrderLimitsComponent implements OnInit, OnDestroy {
   }
 
   onSubmit(): void {
-    const action = this.editingId ? this.api.updateOrderLimit(this.editingId, this.formData) : this.api.createOrderLimit(this.formData);
-    action.subscribe(() => { 
-      const msg = this.editingId 
-        ? this.transloco.translate('GLOBAL.UPDATE_SUCCESS') 
-        : this.transloco.translate('GLOBAL.CREATE_SUCCESS');
-      this.alerts.open(msg, { appearance: 'success' }).subscribe();
-      this.showForm = false; 
-      this.loadData(); 
+    const action = this.editingId 
+      ? this.api.updateUser(this.editingId, this.formData)
+      : this.api.createUser(this.formData);
+
+    action.subscribe(() => {
+      const msg = this.editingId ? 'GLOBAL.UPDATE_SUCCESS' : 'GLOBAL.CREATE_SUCCESS';
+      this.alerts.open(this.transloco.translate(msg), { appearance: 'success' }).subscribe();
+      this.showForm = false;
+      this.loadData();
     });
   }
 
