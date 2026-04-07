@@ -1,4 +1,14 @@
-import { Component, OnInit, ChangeDetectionStrategy, inject, ChangeDetectorRef, ViewChild, TemplateRef } from '@angular/core';
+import {
+  Component,
+  OnInit,
+  ChangeDetectionStrategy,
+  inject,
+  ChangeDetectorRef,
+  ViewChild,
+  TemplateRef,
+  DestroyRef,
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { RouterModule, Router, ActivatedRoute } from '@angular/router';
 import { ApiService, Product, ProductVariant, OrderLimit } from '../../services/api.service';
@@ -12,6 +22,14 @@ import { TuiTextareaModule } from '@taiga-ui/legacy';
 import { TranslocoModule } from '@jsverse/transloco';
 import { FormsModule, ReactiveFormsModule } from '@angular/forms';
 import { take } from 'rxjs';
+import { distinctUntilChanged, map, skip } from 'rxjs/operators';
+import { pickSingleBestRule } from '../../utils/rule-priority';
+import {
+  resolveOrderLimitWinners,
+  isMaxOrderQtyType,
+  isMinOrderQtyType,
+} from '../../utils/order-limit-precedence';
+import { ruleMatchesTargeting } from '../../utils/rule-targeting';
 
 @Component({
   selector: 'app-product-detail',
@@ -43,6 +61,7 @@ import { take } from 'rxjs';
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class ProductDetailComponent implements OnInit {
+  private readonly destroyRef = inject(DestroyRef);
   private readonly auth = inject(AuthService);
   private readonly router = inject(Router);
   private readonly route = inject(ActivatedRoute);
@@ -97,6 +116,8 @@ export class ProductDetailComponent implements OnInit {
   b2bRule: any | null = null;
   quantityBreaks: any[] = [];
   activeOrderLimit: OrderLimit | null = null;
+  /** Giới hạn SL tối đa (PER_PRODUCT / PER_VARIANT), chọn theo priority giống MOQ */
+  activeMaxQtyLimit: OrderLimit | null = null;
 
   get isSelectionIncomplete(): boolean {
     if (!this.product || !this.variants || this.variants.length === 0) return false;
@@ -146,7 +167,7 @@ export class ProductDetailComponent implements OnInit {
 
       if (discountType === 'PERCENTAGE') {
         base = base * (1 - discountValue / 100);
-      } else if (discountType === 'FIXED') {
+      } else if (discountType === 'FIXED' || discountType === 'FIXED_AMOUNT') {
         base = Math.max(0, base - discountValue);
       }
     }
@@ -194,10 +215,69 @@ export class ProductDetailComponent implements OnInit {
   }
 
   get isMoqViolation(): boolean {
-    if (!this.activeOrderLimit || this.activeOrderLimit.limitType !== 'MIN_ORDER_QUANTITY') return false;
-    // We match PER_PRODUCT and PER_VARIANT for product-level enforcement
-    const isProductLevel = this.activeOrderLimit.limitLevel === 'PER_PRODUCT' || this.activeOrderLimit.limitLevel === 'PER_VARIANT';
-    return isProductLevel && this.quantity < this.activeOrderLimit.limitValue;
+    if (!this.activeOrderLimit) return false;
+    const t = this.activeOrderLimit.limitType;
+    if (t !== 'MIN_ORDER_QUANTITY' && t !== 'MIN_ORDER_QTY') return false;
+    const isProductLevel =
+      this.activeOrderLimit.limitLevel === 'PER_PRODUCT' ||
+      this.activeOrderLimit.limitLevel === 'PER_VARIANT';
+    return isProductLevel && this.quantity < (this.activeOrderLimit.limitValue ?? 0);
+  }
+
+  get isMaxQtyViolation(): boolean {
+    if (!this.activeMaxQtyLimit) return false;
+    const t = this.activeMaxQtyLimit.limitType;
+    if (t !== 'MAX_ORDER_QUANTITY' && t !== 'MAX_ORDER_QTY') return false;
+    const isProductLevel =
+      this.activeMaxQtyLimit.limitLevel === 'PER_PRODUCT' ||
+      this.activeMaxQtyLimit.limitLevel === 'PER_VARIANT';
+    const maxV = Number(this.activeMaxQtyLimit.limitValue ?? 0);
+    return isProductLevel && maxV > 0 && this.quantity > maxV;
+  }
+
+  /** Chặn thêm giỏ khi vi phạm MOQ hoặc vượt max SL (theo dòng SP) */
+  get orderLimitBuyBlocked(): boolean {
+    return this.isMoqViolation || this.isMaxQtyViolation;
+  }
+
+  /** Thông báo info khi có MOQ theo dòng SP và khách đã đạt ngưỡng */
+  get showMoqPolicyNotice(): boolean {
+    if (!this.activeOrderLimit) return false;
+    const t = this.activeOrderLimit.limitType;
+    if (t !== 'MIN_ORDER_QUANTITY' && t !== 'MIN_ORDER_QTY') return false;
+    const isProductLevel =
+      this.activeOrderLimit.limitLevel === 'PER_PRODUCT' ||
+      this.activeOrderLimit.limitLevel === 'PER_VARIANT';
+    return isProductLevel && !this.isMoqViolation;
+  }
+
+  /** Thông báo info khi có max SL theo dòng SP và SL hiện tại không vượt ngưỡng */
+  get showMaxQtyPolicyNotice(): boolean {
+    if (!this.activeMaxQtyLimit) return false;
+    const isProductLevel =
+      this.activeMaxQtyLimit.limitLevel === 'PER_PRODUCT' ||
+      this.activeMaxQtyLimit.limitLevel === 'PER_VARIANT';
+    return isProductLevel && !this.isMaxQtyViolation;
+  }
+
+  /** Trần số lượng trên PDP: tồn kho ∧ max quy tắc (nếu có) */
+  private get effectiveQuantityCap(): number {
+    const stock = this.selectedVariant?.stockQuantity ?? 0;
+    const stockCap = stock > 0 ? stock : 999;
+    if (this.activeMaxQtyLimit) {
+      const t = this.activeMaxQtyLimit.limitType;
+      if (
+        (t === 'MAX_ORDER_QUANTITY' || t === 'MAX_ORDER_QTY') &&
+        (this.activeMaxQtyLimit.limitLevel === 'PER_PRODUCT' ||
+          this.activeMaxQtyLimit.limitLevel === 'PER_VARIANT')
+      ) {
+        const ruleMax = Number(this.activeMaxQtyLimit.limitValue ?? 0);
+        if (ruleMax > 0) {
+          return Math.min(stockCap, ruleMax);
+        }
+      }
+    }
+    return stockCap;
   }
 
   constructor() {}
@@ -210,48 +290,62 @@ export class ProductDetailComponent implements OnInit {
     this.route.params.subscribe(() => {
         this.loadProduct();
     });
+
+    this.auth.user$
+      .pipe(
+        map((u) => u?.id ?? null),
+        distinctUntilChanged(),
+        skip(1),
+        takeUntilDestroyed(this.destroyRef)
+      )
+      .subscribe(() => {
+        if (this.route.snapshot.paramMap.get('id')) {
+          this.loadProduct();
+        }
+      });
   }
 
-  loadOrderLimits(productId: number, categoryId: number) {
+  loadOrderLimits(productId: number, categoryId: number | null | undefined) {
     this.api.getOrderLimits().subscribe(rules => {
       const activeRules = rules.filter(r => r.status === 'ACTIVE');
       const user = this.auth.currentUserValue;
 
-      const matchedRules = activeRules.filter(r => {
-        // 1. Customer Check
-        let customerMatch = false;
-        if (r.applyCustomerType === 'ALL') customerMatch = true;
-        else if (r.applyCustomerType === 'GROUP' && r.applyCustomerValue && user?.customerGroup) {
-          try {
-            const val = JSON.parse(r.applyCustomerValue);
-            customerMatch = val.groupId === user.customerGroup.id;
-          } catch (e) {}
-        }
-        if (!customerMatch) return false;
+      const matchedRules = activeRules.filter((r) =>
+        ruleMatchesTargeting(r, { productId, categoryId, user })
+      );
 
-        // 2. Product Check
-        if (r.applyProductType === 'ALL') return true;
-        if (r.applyProductType === 'SPECIFIC' && r.applyProductValue) {
-          try {
-            const val = JSON.parse(r.applyProductValue);
-            return val.productIds?.includes(productId);
-          } catch (e) {}
-        }
-        if (r.applyProductType === 'CATEGORY' && r.applyProductValue) {
-          try {
-            const val = JSON.parse(r.applyProductValue);
-            return val.categoryIds?.includes(categoryId);
-          } catch (e) {}
-        }
-        return false;
-      });
+      const lineQtyMatched = matchedRules.filter(
+        (r) =>
+          (isMinOrderQtyType(r.limitType) || isMaxOrderQtyType(r.limitType)) &&
+          (r.limitLevel === 'PER_PRODUCT' || r.limitLevel === 'PER_VARIANT')
+      );
+      const lineQtyWinners = resolveOrderLimitWinners(lineQtyMatched);
+      this.activeOrderLimit =
+        lineQtyWinners.find((r) => isMinOrderQtyType(r.limitType)) ?? null;
+      this.activeMaxQtyLimit =
+        lineQtyWinners.find((r) => isMaxOrderQtyType(r.limitType)) ?? null;
 
-      if (matchedRules.length > 0) {
-        // Pick highest priority MOQ rule
-        this.activeOrderLimit = matchedRules.sort((a, b) => b.priority - a.priority)[0];
-      } else {
-        this.activeOrderLimit = null;
+      const cap = this.effectiveQuantityCap;
+      let q = this.quantity;
+      if (q > cap) {
+        q = cap;
       }
+      const moq = this.activeOrderLimit?.limitValue;
+      if (
+        this.activeOrderLimit &&
+        (this.activeOrderLimit.limitType === 'MIN_ORDER_QUANTITY' ||
+          this.activeOrderLimit.limitType === 'MIN_ORDER_QTY') &&
+        moq != null &&
+        Number(moq) > 0 &&
+        q < Number(moq)
+      ) {
+        q = Number(moq);
+      }
+      if (q > cap) {
+        q = cap;
+      }
+      this.quantity = Math.max(1, q);
+
       this.cdr.detectChanges();
     });
   }
@@ -369,29 +463,20 @@ export class ProductDetailComponent implements OnInit {
         this.brandName = p.brand || 'NO BRAND';
         this.cdr.detectChanges();
         this.loadVariants(id);
-        this.loadPricingRules(id);
-        if (p.categoryId) {
-          this.loadOrderLimits(p.id, p.categoryId);
-        }
+        this.loadPricingRules(id, p.categoryId);
+        this.loadOrderLimits(p.id, p.categoryId);
       });
     }
   }
 
-  loadPricingRules(productId: number) {
+  loadPricingRules(productId: number, categoryId: number | null | undefined) {
     this.api.getPricingRules().subscribe(rules => {
       const activeRules = rules.filter(r => r.status === 'ACTIVE');
-      
-      // 1. Quantity Break Rules
-      this.qbRules = activeRules.filter(r => {
+      const user = this.auth.currentUserValue;
+
+      this.qbRules = activeRules.filter((r) => {
         if (r.ruleType !== 'QUANTITY_BREAK') return false;
-        if (r.applyProductType === 'ALL') return true;
-        if (r.applyProductType === 'SPECIFIC' && r.applyProductValue) {
-          try {
-            const val = JSON.parse(r.applyProductValue);
-            return val.productIds?.includes(productId);
-          } catch (e) { return false; }
-        }
-        return false;
+        return ruleMatchesTargeting(r, { productId, categoryId, user });
       });
 
       this.qbRules.forEach(r => {
@@ -402,44 +487,20 @@ export class ProductDetailComponent implements OnInit {
         }
       });
 
-      // 2. B2B Pricing Rules
-      const user = this.auth.currentUserValue;
-      const b2bRules = activeRules.filter(r => {
+      const b2bRules = activeRules.filter((r) => {
         if (r.ruleType !== 'B2B_PRICE') return false;
-        
-        // Product Check
-        let productMatch = false;
-        if (r.applyProductType === 'ALL') productMatch = true;
-        else if (r.applyProductType === 'SPECIFIC' && r.applyProductValue) {
-          try {
-            const val = JSON.parse(r.applyProductValue);
-            productMatch = val.productIds?.includes(productId);
-          } catch (e) {}
-        }
-
-        if (!productMatch) return false;
-
-        // Customer Check
-        if (r.applyCustomerType === 'ALL') return true;
-        if (r.applyCustomerType === 'GROUP' && r.applyCustomerValue && user?.customerGroup) {
-          try {
-            const val = JSON.parse(r.applyCustomerValue);
-            return val.groupId === user.customerGroup.id;
-          } catch (e) {}
-        }
-        return false;
+        return ruleMatchesTargeting(r, { productId, categoryId, user });
       });
 
-      // Pick highest priority B2B rule
-      if (b2bRules.length > 0) {
-        this.b2bRule = b2bRules.sort((a, b) => b.priority - a.priority)[0];
+      this.b2bRule = pickSingleBestRule(b2bRules);
+      if (this.b2bRule?.actionConfig) {
         try {
           this.b2bRule.parsedConfig = JSON.parse(this.b2bRule.actionConfig);
-        } catch (e) {}
-      } else {
-        this.b2bRule = null;
+        } catch (e) {
+          this.b2bRule.parsedConfig = undefined;
+        }
       }
-      
+
       this.cdr.detectChanges();
     });
   }
@@ -650,17 +711,15 @@ export class ProductDetailComponent implements OnInit {
   }
 
   adjQuantity(amt: number) {
-    const max = this.selectedVariant?.stockQuantity || 0;
-    const limit = max > 0 ? max : 999;
+    const limit = this.effectiveQuantityCap;
     this.quantity = Math.max(1, Math.min(limit, this.quantity + amt));
     this.cdr.detectChanges();
   }
 
   handleQuantityInput(event: any) {
-    const val = parseInt(event.target.value);
-    const max = this.selectedVariant?.stockQuantity || 0;
-    const limit = max > 0 ? max : 999;
-    
+    const val = parseInt(event.target.value, 10);
+    const limit = this.effectiveQuantityCap;
+
     if (isNaN(val) || val < 1) {
       this.quantity = 1;
     } else if (val > limit) {
@@ -673,6 +732,15 @@ export class ProductDetailComponent implements OnInit {
 
   addToCart() {
     if (!this.product) return;
+    if (this.variants.length > 0 && !this.selectedVariant) {
+      this.alerts
+        .open('Vui lòng chọn đủ màu / size (hoặc biến thể) trước khi thêm vào giỏ hàng.', {
+          label: 'Chưa chọn biến thể',
+          appearance: 'warning',
+        })
+        .subscribe();
+      return;
+    }
     this.cart.addToCart(this.product, this.selectedVariant, this.quantity, this.currentPrice);
   }
 

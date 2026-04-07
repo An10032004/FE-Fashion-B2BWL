@@ -96,6 +96,13 @@ export class CartService {
   }
 
   addToCart(product: Product, variant: ProductVariant | undefined, quantity: number, priceOverride?: number) {
+    if (!variant?.id) {
+      this.alerts.open(
+        'Thiếu mã biến thể (variant) sản phẩm. Vui lòng chọn đủ màu/size trên trang sản phẩm rồi thêm lại.',
+        { label: 'Không thể thêm vào giỏ', appearance: 'warning' },
+      ).subscribe();
+      return;
+    }
     const items = [...this.cartSubject.value];
     let price = priceOverride || product.calculatedPrice || product.basePrice;
     
@@ -136,7 +143,7 @@ export class CartService {
     } else {
       items.push({
         productId: product.id,
-        variantId: variant?.id,
+        variantId: variant.id,
         name: product.name,
         color: variant?.color,
         size: variant?.size,
@@ -166,14 +173,17 @@ export class CartService {
     });
   }
 
+  /** Chỉ kiểm tra các dòng được chọn (đồng bộ với tổng tiền checkout). */
   validate(): Observable<any[]> {
-    const items = this.cartSubject.value.map(i => ({
-      productId: i.productId,
-      categoryId: i.categoryId,
-      quantity: i.quantity,
-      price: i.price
-    }));
-    
+    const items = this.cartSubject.value
+      .filter(i => i.selected !== false)
+      .map(i => ({
+        productId: i.productId,
+        categoryId: i.categoryId,
+        quantity: i.quantity,
+        price: i.price
+      }));
+
     if (items.length === 0) return of([]);
 
     return this.auth.user$.pipe(

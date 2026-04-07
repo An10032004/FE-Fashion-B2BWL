@@ -5,11 +5,11 @@ import { FormBuilder, FormGroup, FormsModule, ReactiveFormsModule, Validators } 
 import { CartService, CartItem } from '../../services/cart.service';
 import { TuiButton, TuiIcon, TuiFormatNumberPipe, TuiLabel, TuiAlertService, TuiLoader, TuiTextfield, TuiDialogService } from '@taiga-ui/core';
 import { TuiBadge } from '@taiga-ui/kit';
-import { BehaviorSubject, map, shareReplay, startWith, switchMap, tap } from 'rxjs';
+import { combineLatest, debounceTime, map, of, shareReplay, startWith, switchMap, take } from 'rxjs';
 import { TranslocoModule } from '@jsverse/transloco';
 import { StorefrontHeaderComponent } from '../../shared/components/storefront-header/storefront-header';
 import { StorefrontFooterComponent } from '../../shared/components/storefront-footer/storefront-footer';
-import { ApiService, OrderRequest } from '../../services/api.service';
+import { ApiService, DebtSummary, NetTermQuote, OrderRequest } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 
 @Component({
@@ -50,31 +50,75 @@ export class CheckoutComponent implements OnInit {
 
   readonly checkoutForm: FormGroup = this.fb.group({
     fullName: ['', [Validators.required]],
-    phone: ['', [Validators.required, Validators.pattern(/^[0-9]{10,11}$/)]],
+    // Bỏ giới hạn độ dài, chỉ giữ kiểm tra ký tự số.
+    phone: ['', [Validators.required, Validators.pattern(/^[0-9]+$/)]],
     shippingAddress: ['', [Validators.required]],
     note: [''],
     paymentMethod: ['COD', [Validators.required]]
   });
 
-  cart$ = this.cartService.cart$.pipe(map(items => items.filter(i => i.selected)), shareReplay(1)); 
-  subtotal$ = this.cart$.pipe(map(items => items.reduce((sum, i) => sum + (i.price * i.quantity), 0)));
-  totalItems$ = this.cart$.pipe(map(items => items.reduce((sum, i) => sum + i.quantity, 0)));
-  
-  shippingFee$ = new BehaviorSubject<number>(0);
-  totalPrice$ = new BehaviorSubject<number>(0);
-
-  isNetTermEligible$ = this.cart$.pipe(
-    map(items => items.length > 0 && items.every(i => (i as any).isNetTermEligible)),
-    startWith(false)
+  cart$ = this.cartService.cart$.pipe(
+    map(items => items.filter(i => i.selected)),
+    shareReplay(1),
   );
 
-  netTermDays$ = this.cart$.pipe(
-    map(items => {
-      const firstEligible = items.find(i => (i as any).isNetTermEligible);
-      return (firstEligible as any)?.netTermDays || 0;
+  subtotal$ = this.cart$.pipe(
+    map(items => items.reduce((sum, i) => sum + i.price * i.quantity, 0)),
+    shareReplay(1),
+  );
+
+  totalItems$ = this.cart$.pipe(
+    map(items => items.reduce((sum, i) => sum + i.quantity, 0)),
+    shareReplay(1),
+  );
+
+  /** Cùng logic API với giỏ hàng: tổng tiền + SL + loại KH, không lọc SP. */
+  shippingQuote$ = combineLatest([this.cartService.cart$, this.auth.user$]).pipe(
+    debounceTime(200),
+    switchMap(([items, user]) => {
+      const selected = items.filter(i => i.selected !== false);
+      const subtotal = selected.reduce((s, i) => s + i.price * i.quantity, 0);
+      const qty = selected.reduce((s, i) => s + i.quantity, 0);
+      if (selected.length === 0) {
+        return of({
+          fee: 0,
+          matched: false,
+          tierFeeBeforeDiscount: 0,
+          ruleName: undefined as string | undefined,
+          baseOn: undefined as string | undefined,
+        });
+      }
+      return this.apiService.quoteShipping({
+        userId: user?.id,
+        orderAmount: subtotal,
+        totalQuantity: qty,
+      });
     }),
-    startWith(0)
+    shareReplay(1),
   );
+
+  shippingFee$ = this.shippingQuote$.pipe(map(q => q?.fee ?? 0));
+
+  totalPrice$ = combineLatest([this.subtotal$, this.shippingFee$]).pipe(
+    map(([sub, fee]) => sub + fee),
+  );
+
+  debtSummary$ = this.auth.user$.pipe(
+    switchMap(user => user?.id ? this.apiService.getDebtSummary(user.id) : of({ blocked: false, overdueCount: 0, items: [] } as DebtSummary)),
+    startWith({ blocked: false, overdueCount: 0, items: [] } as DebtSummary),
+    shareReplay(1),
+  );
+
+  isBlockedByDebt$ = this.debtSummary$.pipe(map(s => s.blocked));
+
+  netTermQuote$ = this.auth.user$.pipe(
+    switchMap(user => user?.id ? this.apiService.quoteNetTerm(user.id) : of({ eligible: false } as NetTermQuote)),
+    startWith({ eligible: false } as NetTermQuote),
+    shareReplay(1),
+  );
+
+  isNetTermEligible$ = this.netTermQuote$.pipe(map(q => !!q.eligible));
+  netTermDays$ = this.netTermQuote$.pipe(map(q => q.netTermDays || 0));
 
   isPlacingOrder = false;
 
@@ -87,17 +131,6 @@ export class CheckoutComponent implements OnInit {
       });
     }
 
-    // Calculate shipping and total
-    this.subtotal$.pipe(
-      switchMap(subtotal => 
-        this.totalItems$.pipe(
-          map(itemsCount => ({ subtotal, itemsCount }))
-        )
-      )
-    ).subscribe(({ subtotal, itemsCount }) => {
-      this.calculateShipping(subtotal, itemsCount);
-    });
-
     // If cart is empty, go back to storefront
     this.cartService.cart$.subscribe(items => {
       if (items.length === 0 && !this.isPlacingOrder) {
@@ -106,128 +139,152 @@ export class CheckoutComponent implements OnInit {
     });
   }
 
-  private calculateShipping(subtotal: number, itemsCount: number) {
-    this.apiService.getShippingRules().subscribe(rules => {
-      const activeRules = rules.filter(r => r.status === 'ACTIVE');
-      if (activeRules.length === 0) {
-        this.updateTotal(subtotal, 0);
-        return;
-      }
-
-      // Sort by priority (lower is better, or match logic from backend)
-      const sortedRules = activeRules.sort((a, b) => (a.priority || 0) - (b.priority || 0));
-      const user = this.auth.currentUserValue;
-      
-      // Find matching rule
-      let matchedRule = sortedRules.find(rule => {
-        // Customer Group Check
-        if (rule.applyCustomerType === 'GROUP' && rule.applyCustomerValue) {
-          try {
-            const val = JSON.parse(rule.applyCustomerValue);
-            const groupIds = val.groupIds || [];
-            return groupIds.includes(user?.customerGroup?.id);
-          } catch(e) { return false; }
-        }
-        if (rule.applyCustomerType === 'LOGGED_IN') return !!user;
-        if (rule.applyCustomerType === 'GUEST') return !user;
-        return true; // ALL
-      });
-
-      if (!matchedRule) {
-        this.updateTotal(subtotal, 0);
-        return;
-      }
-
-      // Calculate fee from rateRanges
-      let fee = 0;
-      try {
-        const ranges = JSON.parse(matchedRule.rateRanges || '[]');
-        const valToCheck = matchedRule.baseOn === 'AMOUNT_RANGE' ? subtotal : itemsCount;
-        
-        const rangeMatch = ranges.find((r: any) => {
-          const from = r.from ?? r.min ?? -1;
-          const to = r.to ?? r.max ?? 999999999;
-          return valToCheck >= from && valToCheck <= to;
-        });
-
-        if (rangeMatch) {
-          fee = rangeMatch.rate || 0;
-        }
-      } catch (e) {
-        console.error('Error parsing shipping ranges', e);
-      }
-
-      this.shippingFee$.next(fee);
-      this.updateTotal(subtotal, fee);
-    });
-  }
-
-  private updateTotal(subtotal: number, shipping: number) {
-    this.totalPrice$.next(subtotal + shipping);
-  }
-
   setPaymentMethod(method: string) {
     this.checkoutForm.get('paymentMethod')?.setValue(method);
   }
 
+  setPaymentMethodIfAllowed(method: string): void {
+    this.isBlockedByDebt$.pipe(take(1)).subscribe(blocked => {
+      if (!blocked) {
+        this.setPaymentMethod(method);
+      }
+    });
+  }
+
   onSubmit() {
     if (this.checkoutForm.invalid || this.isPlacingOrder) return;
-
-    this.isPlacingOrder = true;
-    const formValue = this.checkoutForm.value;
-    const currentItems = this.cartService.cartItems.filter(i => i.selected);
-    const user = this.auth.currentUserValue;
-    const subtotal = currentItems.reduce((sum, i) => sum + (i.price * i.quantity), 0);
-    const shippingFee = this.shippingFee$.value;
-    const finalTotal = subtotal + shippingFee;
-
-    const request: OrderRequest = {
-      userId: user?.id,
-      orderType: 'RETAIL',
-      paymentMethod: formValue.paymentMethod,
-      fullName: formValue.fullName,
-      phone: formValue.phone,
-      shippingAddress: formValue.shippingAddress,
-      note: formValue.note,
-      shippingFee: shippingFee,
-      items: currentItems.map(i => ({
-        productId: i.productId,
-        variantId: i.variantId,
-        quantity: i.quantity,
-        unitPrice: i.price
-      }))
-    };
-
-    this.apiService.createOrder(request).subscribe({
-      next: (order) => {
-        this.isPlacingOrder = false;
-        this.currentOrder = order;
-        if (formValue.paymentMethod === 'VNPAY') {
-          // Generate VietQR URL
-          // Bank: VietinBank (970415), Acc: 103877669895
-          const bankId = '970415';
-          const accountNo = '103877669895';
-          const accountName = encodeURIComponent('NGUYEN VAN SON');
-          const description = encodeURIComponent(`Thanh toan don hang #${order.id}`);
-          
-          this.paymentQrUrl = `https://img.vietqr.io/image/${bankId}-${accountNo}-compact2.png?amount=${finalTotal}&addInfo=${description}&accountName=${accountName}`;
-          
-          this.dialogs.open(this.paymentDialogTemplate, { 
-            size: 'm', 
-            dismissible: false,
-            label: 'Secure Checkout' 
-          }).subscribe(); // Removed the complete handler that was causing premature redirection
-        } else {
-          this.onPaymentComplete();
+    const currentUser = this.auth.currentUserValue;
+    if (!currentUser?.id) {
+      this.alerts.open('Vui lòng đăng nhập để đặt hàng.', {
+        label: 'Yêu cầu đăng nhập',
+        appearance: 'warning',
+      }).subscribe();
+      return;
+    }
+    this.isBlockedByDebt$.pipe(take(1)).subscribe(blocked => {
+      if (blocked) {
+        this.alerts.open('Bạn đang có công nợ quá hạn. Vui lòng thanh toán các đơn công nợ trước khi đặt đơn mới.', {
+          label: 'Công nợ quá hạn',
+          appearance: 'error',
+        }).subscribe();
+        return;
+      }
+      this.isPlacingOrder = true;
+      this.cartService.validate().pipe(take(1)).subscribe({
+      next: (results) => {
+        const failures = (results || []).filter((r: { success?: boolean }) => r.success === false);
+        if (failures.length > 0) {
+          failures.forEach((f: { message?: string }) => {
+            this.alerts
+              .open(f.message || 'Đơn hàng không đáp ứng quy định giới hạn.', {
+                label: 'Quy định đơn hàng',
+                appearance: 'warning',
+              })
+              .subscribe();
+          });
+          this.isPlacingOrder = false;
+          return;
         }
+        this.placeOrderAfterValidation();
       },
-      error: (err) => {
-        this.alerts.open('An error occurred while placing your order. Please try again.', { 
-          label: 'Order Failed', 
-          appearance: 'error' 
+      error: () => {
+        this.alerts
+          .open('Không kiểm tra được quy định đơn hàng. Vui lòng thử lại.', {
+            label: 'Lỗi',
+            appearance: 'error',
+          })
+          .subscribe();
+        this.isPlacingOrder = false;
+      },
+    });
+    });
+  }
+
+  private placeOrderAfterValidation() {
+    this.shippingQuote$.pipe(take(1)).subscribe({
+      next: quote => {
+        const formValue = this.checkoutForm.value;
+        const currentItems = this.cartService.cartItems.filter(i => i.selected);
+        const user = this.auth.currentUserValue;
+        if (!user?.id) {
+          this.alerts.open('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.', {
+            label: 'Không thể đặt hàng',
+            appearance: 'error',
+          }).subscribe();
+          this.isPlacingOrder = false;
+          return;
+        }
+        if (currentItems.length === 0) {
+          this.alerts.open(
+            'Không có sản phẩm hợp lệ để đặt hàng. Vui lòng chọn lại sản phẩm có đủ biến thể.',
+            { label: 'Giỏ hàng không hợp lệ', appearance: 'warning' },
+          ).subscribe();
+          this.isPlacingOrder = false;
+          return;
+        }
+        const subtotal = currentItems.reduce((sum, i) => sum + i.price * i.quantity, 0);
+        const shippingFee = quote?.fee ?? 0;
+        const finalTotal = subtotal + shippingFee;
+
+        const request: OrderRequest = {
+          userId: user.id,
+          orderType: 'RETAIL',
+          paymentMethod: formValue.paymentMethod,
+          fullName: formValue.fullName,
+          phone: formValue.phone,
+          shippingAddress: formValue.shippingAddress,
+          note: formValue.note,
+          shippingFee,
+          items: currentItems.map(i => ({
+            productId: i.productId,
+            variantId: i.variantId,
+            quantity: i.quantity,
+            unitPrice: i.price,
+          })),
+        };
+
+        this.apiService.createOrder(request).subscribe({
+          next: order => {
+            this.isPlacingOrder = false;
+            this.currentOrder = order;
+            if (formValue.paymentMethod === 'VNPAY') {
+              const bankId = '970415';
+              const accountNo = '103877669895';
+              const accountName = encodeURIComponent('NGUYEN VAN SON');
+              const description = encodeURIComponent(`Thanh toan don hang #${order.id}`);
+
+              this.paymentQrUrl = `https://img.vietqr.io/image/${bankId}-${accountNo}-compact2.png?amount=${finalTotal}&addInfo=${description}&accountName=${accountName}`;
+
+              this.dialogs.open(this.paymentDialogTemplate, {
+                size: 'm',
+                dismissible: false,
+                label: 'Secure Checkout',
+              }).subscribe();
+            } else {
+              this.onPaymentComplete();
+            }
+          },
+          error: (err) => {
+            const msg =
+              err?.error?.message ||
+              err?.error?.error ||
+              err?.message ||
+              'An error occurred while placing your order. Please try again.';
+            this.alerts.open(msg, {
+              label: 'Order Failed',
+              appearance: 'error',
+            }).subscribe();
+            this.isPlacingOrder = false;
+          },
+        });
+      },
+      error: () => {
+        this.alerts.open('Không tính được phí vận chuyển. Vui lòng thử lại.', {
+          label: 'Lỗi',
+          appearance: 'error',
         }).subscribe();
         this.isPlacingOrder = false;
-      }
+      },
     });
   }
 

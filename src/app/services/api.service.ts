@@ -173,6 +173,15 @@ export interface ShippingRule {
   discountValue?: number;
 }
 
+/** Phản hồi POST /api/shipping-rules/quote — theo tổng đơn + loại khách, không lọc SP. */
+export interface ShippingQuote {
+  fee: number;
+  tierFeeBeforeDiscount?: number;
+  ruleName?: string;
+  baseOn?: string;
+  matched: boolean;
+}
+
 export interface NetTermRule {
   id: number;
   name: string;
@@ -182,6 +191,29 @@ export interface NetTermRule {
   applyCustomerValue?: string;
   conditionType?: string;
   netTermDays: number;
+}
+
+export interface NetTermQuote {
+  eligible: boolean;
+  netTermDays?: number;
+  ruleName?: string;
+}
+
+export interface DebtOrderReportRow {
+  orderId: number;
+  customerName?: string;
+  customerGroupName?: string;
+  createdAt?: string;
+  dueDate?: string;
+  daysLeft: number;
+  debtStatus: 'CON_HAN' | 'SAP_DEN_HAN' | 'QUA_HAN';
+  paymentStatus?: string;
+}
+
+export interface DebtSummary {
+  blocked: boolean;
+  overdueCount: number;
+  items: DebtOrderReportRow[];
 }
 
 export interface TaxDisplayRule {
@@ -545,9 +577,27 @@ export class ApiService {
     return this.http.post<ApiResponse<any[]>>(`${this.base}/order-limits/validate`, { userId, items }).pipe(map(r => r.data));
   }
 
+  /** Cảnh báo trùng ưu tiên / trùng phạm vi MOQ-MOV (backend OrderLimitService.detectConflicts). */
+  checkOrderLimitConflicts(draft: Partial<OrderLimit>, excludeRuleId: number | null | undefined): Observable<string[]> {
+    return this.http.post<string[]>(`${this.base}/order-limits/conflicts`, {
+      draft,
+      excludeRuleId: excludeRuleId ?? null,
+    });
+  }
+
   // ─── Shipping Rules ────────────────────────────────────
   getShippingRules(): Observable<ShippingRule[]> {
     return this.http.get<ApiResponse<ShippingRule[]>>(`${this.base}/shipping-rules`).pipe(map(r => r.data));
+  }
+
+  quoteShipping(body: { userId?: number | null; orderAmount: number; totalQuantity: number }): Observable<ShippingQuote> {
+    return this.http
+      .post<ApiResponse<ShippingQuote>>(`${this.base}/shipping-rules/quote`, {
+        userId: body.userId ?? null,
+        orderAmount: body.orderAmount,
+        totalQuantity: body.totalQuantity,
+      })
+      .pipe(map(r => r.data));
   }
   createShippingRule(body: Partial<ShippingRule>): Observable<ShippingRule> {
     return this.http.post<ApiResponse<ShippingRule>>(`${this.base}/shipping-rules`, body).pipe(map(r => r.data));
@@ -571,6 +621,11 @@ export class ApiService {
   }
   deleteNetTermRule(id: number): Observable<void> {
     return this.http.delete<ApiResponse<void>>(`${this.base}/net-term-rules/${id}`).pipe(map(r => r.data));
+  }
+  quoteNetTerm(userId?: number | null): Observable<NetTermQuote> {
+    const params: any = {};
+    if (userId != null) params.userId = userId;
+    return this.http.get<ApiResponse<NetTermQuote>>(`${this.base}/net-term-rules/quote`, { params }).pipe(map(r => r.data));
   }
 
   // ─── Tax Display Rules ──────────────────────────────────
@@ -622,6 +677,9 @@ export class ApiService {
   getUsersByRoles(roles: string[]): Observable<User[]> {
     return this.http.get<ApiResponse<User[]>>(`${this.base}/users/roles`, { params: { roles: roles.join(',') } }).pipe(map(r => r.data));
   }
+  getUserById(id: number): Observable<User> {
+    return this.http.get<ApiResponse<User>>(`${this.base}/users/${id}`).pipe(map(r => r.data));
+  }
   createUser(body: any): Observable<User> {
     return this.http.post<ApiResponse<User>>(`${this.base}/users`, body).pipe(map(r => r.data));
   }
@@ -644,6 +702,16 @@ export class ApiService {
 
   getOrdersByUser(userId: number): Observable<Order[]> {
     return this.http.get<ApiResponse<Order[]>>(`${this.base}/orders/user/${userId}`).pipe(map(r => r.data));
+  }
+
+  getDebtSummary(userId: number): Observable<DebtSummary> {
+    return this.http.get<ApiResponse<DebtSummary>>(`${this.base}/orders/user/${userId}/debt-summary`).pipe(map(r => r.data));
+  }
+
+  getDebtReport(startDate?: string, endDate?: string): Observable<DebtOrderReportRow[]> {
+    return this.http.get<ApiResponse<DebtOrderReportRow[]>>(`${this.base}/orders/debt-report`, {
+      params: { startDate: startDate || '', endDate: endDate || '' }
+    }).pipe(map(r => r.data));
   }
 
   getOrdersByUserPaged(userId: number, page: number = 0, size: number = 10): Observable<any> {
